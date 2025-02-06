@@ -1,20 +1,17 @@
 import { create } from 'zustand';
-import { StateCreator } from 'zustand';
 
-type View = 'search' | 'album';
+type View = 'search' | 'playlist';
 
 interface AppState {
-  currentView: View;
-  selectedAlbum: string | null;
+  view: View;
+  currentPlaylistId: string | null;
   setView: (view: View) => void;
-  setSelectedAlbum: (identifier: string | null) => void;
+  setCurrentPlaylist: (id: string | null) => void;
 }
 
-const store: StateCreator<AppState> = (set) => ({
-  currentView: 'search',
-  selectedAlbum: null,
-  setView: (view: View) => set(() => ({ currentView: view })),
-  setSelectedAlbum: (identifier: string | null) => set(() => ({ selectedAlbum: identifier }))
-});
-
-export const useAppState = create<AppState>(store);
+export const useAppState = create<AppState>((set) => ({
+  view: 'search',
+  currentPlaylistId: null,
+  setView: (view) => set({ view }),
+  setCurrentPlaylist: (id) => set({ currentPlaylistId: id }),
+}));

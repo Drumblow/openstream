@@ -31,29 +31,6 @@ const app = express();
 const port = process.env.PORT || 3001;
 const ARCHIVE_API_URL = 'https://archive.org/advancedsearch.php';
 
-// Cache em memória
-const cache = new Map<string, { data: any; timestamp: number }>();
-const CACHE_TTL = 3600000; // 1 hora em millisegundos
-
-const getFromCache = (key: string) => {
-  const item = cache.get(key);
-  if (!item) return null;
-  
-  if (Date.now() - item.timestamp > CACHE_TTL) {
-    cache.delete(key);
-    return null;
-  }
-  
-  return item.data;
-};
-
-const setToCache = (key: string, data: any) => {
-  cache.set(key, {
-    data,
-    timestamp: Date.now()
-  });
-};
-
 app.use(cors());
 app.use(express.json());
 
@@ -82,6 +59,16 @@ function isSameAlbum(title1: string, title2: string): boolean {
          norm2.includes(norm1);
 }
 
+const validateAudioFiles = (files: any[]) => {
+  return files.some(file => 
+    (file.format === 'VBR MP3' || file.format === 'MP3') && 
+    file.length && 
+    parseInt(file.length) > 0 && 
+    !file.name.includes('/') && // Evita subdiretórios
+    !file.name.startsWith('_') // Evita arquivos de sistema
+  );
+};
+
 app.get('/api/search/artist', async (req: Request, res: Response) => {
   try {
     const { query } = req.query;
@@ -92,37 +79,44 @@ app.get('/api/search/artist', async (req: Request, res: Response) => {
     }
 
     const decodedQuery = decodeURIComponent(query).trim();
-    const cacheKey = `artist:${decodedQuery}`;
-    const cachedResults = getFromCache(cacheKey);
     
-    if (cachedResults) {
-      console.log('Returning cached results for:', decodedQuery);
-      return res.json(cachedResults);
-    }
-
     console.log('Fetching from Internet Archive...');
     
     // Construir uma query mais abrangente
     const searchTerms = decodedQuery.split(/\s+/).filter(term => term.length > 1);
     const normalizedQuery = searchTerms.join(' ');
     
-    // Query mais abrangente inspirada no exemplo bem-sucedido
-    const searchQuery = `mediatype:(audio) AND (
-      title:"${normalizedQuery}" OR 
-      creator:"${normalizedQuery}" OR 
-      (${searchTerms.map(term => `title:"${term}"`).join(' AND ')}) OR
-      (${searchTerms.map(term => `creator:"${term}"`).join(' AND ')})
-    ) AND format:(MP3) AND -collection:podcasts AND -title:cover`;
+    // Query mais refinada
+    const searchQuery = `(
+      mediatype:(audio) AND (
+        creator:"${normalizedQuery}"^4 OR 
+        title:"${normalizedQuery}"^3 OR 
+        (${searchTerms.map(term => `creator:"${term}"`).join(' AND ')})^2 OR
+        (${searchTerms.map(term => `title:"${term}"`).join(' AND ')})
+      )
+    ) AND (
+      format:(MP3) OR format:"VBR MP3"
+    ) AND -collection:podcasts 
+      AND -collection:librivox
+      AND -collection:audio_religion
+      AND -title:cover 
+      AND -title:karaoke
+      AND -title:remix
+      AND -title:"sound effect"
+      AND -title:instrumental
+      AND avg_rating:[3 TO 5]
+      AND num_reviews:[1 TO *]
+      AND downloads:[100 TO *]`;
 
     console.log('Search query:', searchQuery);
 
     const response = await axios.get(ARCHIVE_API_URL, {
       params: {
         q: searchQuery,
-        fl: ['identifier', 'title', 'creator', 'year', 'format', 'collection'],
-        sort: ['downloads desc', 'year desc'],
+        fl: ['identifier', 'title', 'creator', 'year', 'format', 'collection', 'downloads', 'avg_rating'],
+        sort: ['downloads desc', 'avg_rating desc', 'year desc'],
         output: 'json',
-        rows: '100'
+        rows: '150' // Aumentamos para ter mais opções após filtragem
       }
     });
 
@@ -189,7 +183,6 @@ app.get('/api/search/artist', async (req: Request, res: Response) => {
         .slice(0, 50);
     }
 
-    setToCache(cacheKey, response.data);
     res.json(response.data);
   } catch (error: any) {
     console.error('Search error details:', {
@@ -208,8 +201,49 @@ app.get('/api/search/artist', async (req: Request, res: Response) => {
 app.get('/api/track/:identifier', async (req: Request, res: Response) => {
   try {
     const { identifier } = req.params;
+
+    // Adicionar logs detalhados
+    console.log('\n=== Album Details ===');
+    console.log('Identifier:', identifier);
+    console.log('Archive.org URL:', `https://archive.org/details/${identifier}`);
+    console.log('Metadata URL:', `https://archive.org/metadata/${identifier}`);
+    console.log('===================\n');
+
     const response = await axios.get(`https://archive.org/metadata/${identifier}`);
     const metadata = response.data;
+
+    // Adicionar mais informações de debug
+    console.log('Album Metadata:', {
+      title: metadata.metadata.title,
+      creator: metadata.metadata.creator,
+      year: metadata.metadata.year,
+      totalFiles: metadata.files.length,
+      audioFiles: metadata.files.filter((f: any) => 
+        f.format === 'VBR MP3' || f.format === 'MP3'
+      ).length
+    });
+
+    // Validar arquivos MP3
+    const validFiles = metadata.files.filter((file: any) => 
+      (file.format === 'VBR MP3' || file.format === 'MP3') &&
+      file.length &&
+      parseInt(file.length) > 0 &&
+      !file.name.includes('/') &&
+      !file.name.startsWith('_')
+    );
+
+    console.log('Valid audio files:', validFiles.length);
+    
+    if (validFiles.length === 0) {
+      console.log('Warning: No valid audio files found in this album');
+      return res.status(404).json({ error: 'No valid audio files found' });
+    }
+
+    // Log dos arquivos válidos
+    console.log('\nValid tracks:');
+    validFiles.forEach((file: any, index: number) => {
+      console.log(`${index + 1}. ${file.name} (${file.format}, ${file.length}s)`);
+    });
 
     // Processar os dados do álbum
     const album = {
@@ -218,18 +252,25 @@ app.get('/api/track/:identifier', async (req: Request, res: Response) => {
       creator: metadata.metadata.creator,
       year: metadata.metadata.year,
       coverUrl: `https://archive.org/services/img/${identifier}`,
-      tracks: metadata.files
-        .filter((file: any) => file.format === 'VBR MP3' || file.format === 'MP3')
+      tracks: validFiles
         .map((file: any) => ({
           identifier: `${identifier}/${file.name}`,
-          title: file.title || file.name.replace(/\.[^/.]+$/, ""),
+          title: file.title || file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " "),
           creator: metadata.metadata.creator,
           streamUrl: `https://archive.org/download/${identifier}/${file.name}`,
-          duration: file.length,
-          track: file.track,
-          format: file.format
+          duration: parseFloat(file.length) || 0,
+          track: file.track ? parseInt(file.track) : null,
+          format: file.format,
+          size: parseInt(file.size || '0'),
+          bitrate: file.bitrate
         }))
-        .sort((a: any, b: any) => (a.track || 0) - (b.track || 0))
+        .sort((a: any, b: any) => {
+          // Melhor ordenação de faixas
+          if (a.track && b.track) return a.track - b.track;
+          if (a.track) return -1;
+          if (b.track) return 1;
+          return a.title.localeCompare(b.title);
+        })
     };
 
     res.json(album);

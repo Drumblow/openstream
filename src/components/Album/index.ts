@@ -1,0 +1,1 @@
+export { AlbumView } from './AlbumView';

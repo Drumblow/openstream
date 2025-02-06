@@ -42,3 +42,29 @@ export interface Album {
   coverUrl?: string;
   tracks: Track[];
 }
+
+export interface Playlist {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+  coverUrl?: string;
+  tracks: PlaylistTrack[];
+  isSystem?: boolean;
+  settings: PlaylistSettings;
+}
+
+export interface PlaylistTrack extends Track {
+  addedAt: number;
+  lastPlayedAt?: number;
+  playCount: number;
+  position: number;
+}
+
+export interface PlaylistSettings {
+  repeat: 'none' | 'all' | 'one';
+  shuffle: boolean;
+  crossfade: boolean;
+  crossfadeDuration: number;
+}
