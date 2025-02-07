@@ -1,160 +1,118 @@
 import React, { useEffect, useState } from 'react';
-import { Album, Track } from '../../types/interfaces';
+import { Album } from '../../types/interfaces';
 import { getTrackDetails } from '../../services/api';
-import { useAppState } from '../../hooks/useAppState';
+import { Play, Heart } from 'lucide-react';
 import { usePlayer } from '../../hooks/usePlayer';
-import { Play, Heart, Plus } from 'lucide-react';
 import { useFavorites } from '../../hooks/useFavorites';
-import { usePlaylists } from '../../hooks/usePlaylists';
-import { toast } from '../../services/toastService';
+import { formatDuration } from '../../utils/format';
 
 interface AlbumViewProps {
   identifier: string;
+  onBack?: () => void;
 }
 
-export const AlbumView: React.FC<AlbumViewProps> = ({ identifier }) => {
+export const AlbumView: React.FC<AlbumViewProps> = ({ identifier, onBack }) => {
   const [album, setAlbum] = useState<Album | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const { setView } = useAppState();
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const { setCurrentTrack } = usePlayer();
   const { isFavorite, addFavorite, removeFavorite } = useFavorites();
-  const { playlists, addTrack } = usePlaylists();
-  const [showPlaylistMenu, setShowPlaylistMenu] = useState<string | null>(null);
 
   useEffect(() => {
     const loadAlbum = async () => {
       try {
         const data = await getTrackDetails(identifier);
+        console.log('Album data:', data);
         setAlbum(data);
-      } catch (error) {
-        console.error('Failed to load album:', error);
+      } catch (err) {
+        console.error('Failed to load album:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load album');
       } finally {
-        setIsLoading(false);
+        setLoading(false);
       }
     };
 
-    loadAlbum();
+    if (identifier) {
+      loadAlbum();
+    }
   }, [identifier]);
 
-  const handleTrackSelect = (selectedTrack: Track) => {
-    if (album) {
-      setCurrentTrack(selectedTrack, album.tracks);
-    }
-  };
+  if (loading) {
+    return <div className="p-8 text-center">Loading...</div>;
+  }
 
-  const handleAddToPlaylist = (track: Track, playlistId: string) => {
-    addTrack(playlistId, track);
-    toast({
-      title: 'Success',
-      description: 'Track added to playlist',
-      type: 'success'
-    });
-    setShowPlaylistMenu(null);
-  };
-
-  if (isLoading) {
-    return <div className="text-center text-zinc-400">Loading album...</div>;
+  if (error) {
+    return <div className="p-8 text-center text-red-500">{error}</div>;
   }
 
   if (!album) {
-    return <div className="text-center text-zinc-400">Album not found</div>;
+    return <div className="p-8 text-center">Album not found</div>;
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <button 
-        onClick={() => setView('search')}
-        className="mb-6 text-zinc-400 hover:text-white"
-      >
-        ← Back to search
-      </button>
-
+    <div className="p-8">
       <div className="flex gap-8">
         <div className="w-64 flex-shrink-0">
           <img
-            src={album.coverUrl}
+            src={album.coverUrl || '/album-placeholder.png'}
             alt={album.title}
-            className="w-full rounded-lg shadow-lg bg-zinc-800"
-            onError={(e) => {
-              e.currentTarget.src = '/album-placeholder.png';
-            }}
+            className="w-full aspect-square object-cover rounded-lg shadow-lg"
           />
         </div>
 
         <div className="flex-1">
-          <h1 className="text-3xl font-bold mb-2">{album.title}</h1>
-          <p className="text-xl text-zinc-400 mb-6">{album.creator}</p>
-          
-          <div className="mt-6 space-y-2">
-            {album?.tracks.map((track, index) => (
-              <div
-                key={track.identifier}
-                className="flex items-center gap-4 p-3 hover:bg-zinc-700/50 rounded-lg group"
+          <h1 className="text-4xl font-bold mb-2">{album.title}</h1>
+          <p className="text-xl text-zinc-400 mb-4">{album.creator}</p>
+          {album.year && (
+            <p className="text-zinc-500 mb-6">{album.year}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-8">
+        <div className="grid gap-2">
+          {album.tracks.map((track, index) => (
+            <div
+              key={track.identifier}
+              className="flex items-center gap-4 p-3 hover:bg-zinc-800/50 rounded-lg group"
+            >
+              <span className="text-zinc-500 w-8 text-center">{track.track || index + 1}</span>
+              
+              <button
+                onClick={() => setCurrentTrack(track, album.tracks)}
+                className="p-2 hover:bg-zinc-700 rounded-full"
               >
-                <span className="text-zinc-500 w-8 text-center">{index + 1}</span>
-                <Play 
-                  className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer" 
-                  onClick={() => handleTrackSelect(track)}
-                />
-                
-                <div className="flex-1">
-                  <p className="font-medium">{track.title}</p>
-                  {track.duration && (
-                    <p className="text-sm text-zinc-500">
-                      {Math.floor(track.duration / 60)}:
-                      {Math.floor(track.duration % 60).toString().padStart(2, '0')}
-                    </p>
-                  )}
-                </div>
+                <Play size={16} className="text-zinc-400 group-hover:text-emerald-500" />
+              </button>
 
-                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={() => setShowPlaylistMenu(track.identifier)}
-                    className="p-2 hover:bg-zinc-700 rounded-full"
-                  >
-                    <Plus size={16} className="text-zinc-400 hover:text-emerald-500" />
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      if (isFavorite(track.identifier)) {
-                        removeFavorite(track.identifier);
-                      } else {
-                        addFavorite(track);
-                      }
-                    }}
-                    className="p-2 hover:bg-zinc-700 rounded-full"
-                  >
-                    <Heart
-                      size={16}
-                      className={isFavorite(track.identifier) ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400 hover:text-emerald-500'}
-                    />
-                  </button>
-                </div>
-
-                {showPlaylistMenu === track.identifier && (
-                  <div 
-                    className="absolute right-8 mt-2 w-56 bg-zinc-800 rounded-lg shadow-lg py-1 z-50"
-                  >
-                    {playlists.map(playlist => (
-                      <button
-                        key={playlist.id}
-                        onClick={() => handleAddToPlaylist(track, playlist.id)}
-                        className="w-full px-4 py-2 text-sm text-left hover:bg-zinc-700 text-zinc-300"
-                      >
-                        {playlist.name}
-                      </button>
-                    ))}
-                    {playlists.length === 0 && (
-                      <div className="px-4 py-2 text-sm text-zinc-500">
-                        No playlists created yet
-                      </div>
-                    )}
-                  </div>
-                )}
+              <div className="flex-1">
+                <p className="font-medium">{track.title}</p>
+                <p className="text-sm text-zinc-400">{track.artist || album.creator}</p>
               </div>
-            ))}
-          </div>
+
+              <button
+                onClick={() => {
+                  if (isFavorite(track.identifier)) {
+                    removeFavorite(track.identifier);
+                  } else {
+                    addFavorite(track);
+                  }
+                }}
+                className="p-2 hover:bg-zinc-700 rounded-full opacity-0 group-hover:opacity-100"
+              >
+                <Heart
+                  size={16}
+                  className={isFavorite(track.identifier) ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400 hover:text-emerald-500'}
+                />
+              </button>
+
+              {track.duration && (
+                <span className="text-sm text-zinc-400 w-16 text-right">
+                  {formatDuration(track.duration)}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
       </div>
     </div>

@@ -33,7 +33,14 @@ export default async function handler(
   }
 
   try {
-    const { query } = req.query
+    const { 
+      query, 
+      start = '0', 
+      rows = '10' 
+    } = req.query;
+
+    const startNum = parseInt(start.toString(), 10);
+    const rowsNum = parseInt(rows.toString(), 10);
     
     if (!query || typeof query !== 'string') {
       return res.status(400).json({ error: 'Invalid query parameter' })
@@ -49,82 +56,64 @@ export default async function handler(
     }
 
     const searchTerms = decodedQuery.split(/\s+/).filter(term => term.length > 1)
-    const normalizedQuery = searchTerms.join(' ')
     
-    const searchQuery = `mediatype:(audio) AND (
-      title:"${normalizedQuery}" OR 
-      creator:"${normalizedQuery}" OR 
-      (${searchTerms.map(term => `title:"${term}"`).join(' AND ')}) OR
-      (${searchTerms.map(term => `creator:"${term}"`).join(' AND ')})
-    ) AND format:(MP3) AND -collection:podcasts AND -title:cover`
+    // Melhorar a query de busca
+    const searchQuery = `(${searchTerms.map(term => `creator:"${term}"`).join(' AND ')}) OR ` +
+                       `(${searchTerms.map(term => `title:"${term}"`).join(' AND ')}) OR ` +
+                       `creator:"${decodedQuery}" OR title:"${decodedQuery}"`;
 
+    // Primeiro, buscar o total de resultados disponíveis
+    const countResponse = await axios.get(ARCHIVE_API_URL, {
+      params: {
+        q: searchQuery + ' AND mediatype:(audio) AND format:(MP3) AND -collection:podcasts',
+        fl: ['identifier'],
+        rows: 0,
+        output: 'json'
+      }
+    });
+
+    const totalResults = countResponse.data.response.numFound;
+
+    // Depois, buscar os resultados da página atual
     const response = await axios.get(ARCHIVE_API_URL, {
       params: {
-        q: searchQuery,
-        fl: ['identifier', 'title', 'creator', 'year', 'format', 'collection'],
+        q: searchQuery + ' AND mediatype:(audio) AND format:(MP3) AND -collection:podcasts',
+        fl: ['identifier', 'title', 'creator', 'year', 'downloads', 'format'],
         sort: ['downloads desc', 'year desc'],
         output: 'json',
-        rows: '100'
+        rows: rowsNum,
+        start: startNum
       }
-    })
+    });
 
-    // Process results with scoring
+    // Processar e filtrar resultados
     if (response.data?.response?.docs) {
-      const searchTermsLower = searchTerms.map(term => term.toLowerCase())
-      const groupedByTitle = new Map<string, any[]>()
-      
-      response.data.response.docs.forEach((doc: any) => {
-        const title = Array.isArray(doc.title) ? doc.title[0] : doc.title
-        const creator = Array.isArray(doc.creator) ? doc.creator[0] : doc.creator
-        const normalizedTitle = normalizeTitle(title)
-        
-        let score = 0
-        const titleLower = title?.toLowerCase() || ''
-        const creatorLower = creator?.toLowerCase() || ''
-
-        if (titleLower.includes(decodedQuery.toLowerCase())) score += 10
-        if (creatorLower.includes(decodedQuery.toLowerCase())) score += 10
-        if (creator === 'Album') score -= 5
-
-        searchTermsLower.forEach(term => {
-          if (titleLower.includes(term)) score += 3
-          if (creatorLower.includes(term)) score += 3
-        })
-
-        const scoredDoc = {
+      const processedDocs = response.data.response.docs.map((doc: any) => {
+        return {
           ...doc,
-          _score: score
-        }
+          score: calculateScore(doc, decodedQuery)
+        };
+      }).sort((a: any, b: any) => b.score - a.score);
 
-        const existing = Array.from(groupedByTitle.values()).flat()
-        const similarGroup = existing.find(g => isSameAlbum(g.title, title))
-        
-        if (similarGroup) {
-          const groupKey = normalizeTitle(similarGroup.title)
-          const group = groupedByTitle.get(groupKey) || []
-          group.push(scoredDoc)
-          groupedByTitle.set(groupKey, group)
-        } else {
-          groupedByTitle.set(normalizedTitle, [scoredDoc])
+      const resultData = {
+        response: {
+          docs: processedDocs,
+          numFound: totalResults,
+          start: startNum,
+          rows: rowsNum
         }
-      })
+      };
 
-      response.data.response.docs = Array.from(groupedByTitle.values())
-        .map(group => group.reduce((best, current) => 
-          current._score > best._score ? current : best
-        ))
-        .filter(doc => doc._score > 0)
-        .sort((a, b) => b._score - a._score)
-        .slice(0, 50)
+      // Cache results
+      cache.set(cacheKey, {
+        data: resultData,
+        timestamp: Date.now()
+      });
+
+      res.json(resultData);
+    } else {
+      res.json({ response: { docs: [], numFound: 0, start: startNum, rows: rowsNum } });
     }
-
-    // Cache results
-    cache.set(cacheKey, {
-      data: response.data,
-      timestamp: Date.now()
-    })
-
-    res.json(response.data)
   } catch (error: any) {
     console.error('Search error:', error)
     res.status(500).json({ 
@@ -132,4 +121,20 @@ export default async function handler(
       details: error.message 
     })
   }
+}
+
+function calculateScore(doc: any, query: string): number {
+  const title = Array.isArray(doc.title) ? doc.title[0] : doc.title;
+  const creator = Array.isArray(doc.creator) ? doc.creator[0] : doc.creator;
+  const titleLower = title?.toLowerCase() || '';
+  const creatorLower = creator?.toLowerCase() || '';
+  const queryLower = query.toLowerCase();
+
+  let score = 0;
+  if (creatorLower.includes(queryLower)) score += 10;
+  if (titleLower.includes(queryLower)) score += 5;
+  if (doc.downloads) score += Math.log(doc.downloads);
+  if (doc.year) score += 2;
+
+  return score;
 }

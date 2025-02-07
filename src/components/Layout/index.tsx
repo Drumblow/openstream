@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { PlayerBar } from './components/PlayerBar';
 import { SearchResults } from '../Search/SearchResults';
 import { useAppState } from '../../hooks/useAppState';
-import { searchByArtist } from '../../services/api';
+import { searchArtist } from '../../services/api'; // Atualizado nome da função
 import { DebugPanel } from '../Common/DebugPanel';
 import { PlaylistView } from '../Playlist/PlaylistView';
 
@@ -21,14 +21,19 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
+    
     setIsLoading(true);
     try {
-      const response = await searchByArtist(searchQuery);
-      setSearchResults(response.response.docs);
+      const response = await searchArtist(searchQuery);
+      console.log('Search results:', response);
+      setSearchResults(response.response?.docs || []);
+      setView('search');
     } catch (error) {
       console.error('Search failed:', error);
+      // Optionally show error to user via toast or other UI mechanism
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
   return (
@@ -75,6 +80,12 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
               <SearchResults 
                 results={searchResults}
                 isLoading={isLoading}
+                query={searchQuery}
+                start={0}
+                rows={10}
+                onPageChange={(newStart) => {
+                  // Handle page change if needed
+                }}
               />
             ) : view === 'playlist' && currentPlaylistId ? (
               <PlaylistView 

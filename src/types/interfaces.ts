@@ -9,11 +9,18 @@ export interface SearchParams {
 }
 
 export interface SearchResult {
-  identifier: string;
-  title: string;
-  creator: string;
-  date?: string;
-  year?: string;
+  id?: string;
+  title?: string;
+  artist?: string;
+  tracks?: Track[];
+  coverArt?: {
+    small: string;
+    medium: string;
+    large: string;
+  } | null;
+  total: number;
+  start: number;
+  resultType?: 'releases' | 'recordings' | 'artists';
 }
 
 export interface PlayerState {
@@ -27,11 +34,15 @@ export interface PlayerState {
 export interface Track {
   identifier: string;
   title: string;
-  creator: string;
+  artist: string;
   streamUrl: string;
+  coverArt?: string | null;
+  musicBrainzId?: string;
   duration?: number;
   track?: number;
   format?: string;
+  type?: string;    // Tipo do artista/grupo
+  score?: number;   // Score de relevância da busca
 }
 
 export interface Album {
@@ -67,4 +78,27 @@ export interface PlaylistSettings {
   shuffle: boolean;
   crossfade: boolean;
   crossfadeDuration: number;
+}
+
+export interface MusicBrainzArtist {
+  id: string;
+  name: string;
+  type: string;
+  score?: number;
+}
+
+export interface MusicBrainzRelease {
+  id: string;
+  title: string;
+  date?: string;
+  coverArt?: {
+    small: string;
+    large: string;
+  };
+}
+
+export interface MusicBrainzResponse {
+  artists: MusicBrainzArtist[];
+  count: number;
+  offset: number;
 }

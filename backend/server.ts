@@ -1,286 +1,418 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
 import cors from 'cors';
-import axios from 'axios';
-
-// Add interface for Archive.org document
-interface ArchiveDocument {
-  identifier: string;
-  title: string | string[];
-  creator?: string | string[];
-  year?: string;
-  date?: string;
-}
-
-interface ProcessedDocument {
-  identifier: string;
-  title: string;
-  creator?: string;
-  year?: string;
-  date: string;
-}
-
-interface ScoredDocument {
-  identifier: string;
-  title: string;
-  creator?: string;
-  year?: string;
-  _score: number;
-}
+import axios, { AxiosError } from 'axios';
 
 const app = express();
 const port = process.env.PORT || 3001;
-const ARCHIVE_API_URL = 'https://archive.org/advancedsearch.php';
+const MUSICBRAINZ_API_URL = 'https://musicbrainz.org/ws/2';
+const COVER_ART_URL = 'https://coverartarchive.org';
+const ARCHIVE_API_URL = 'https://archive.org';
+
+// Headers necessários para MusicBrainz
+const headers = {
+  'User-Agent': 'OpenStream/1.0.0 (your@email.com)',
+  'Accept': 'application/json'
+};
+
+// Adicionar função de log
+const logRequestInfo = (endpoint: string, params: any) => {
+  console.log('\n=== API Request ===');
+  console.log('Endpoint:', endpoint);
+  console.log('Params:', JSON.stringify(params, null, 2));
+};
+
+const logResponseInfo = (endpoint: string, data: any) => {
+  console.log('\n=== API Response ===');
+  console.log('Endpoint:', endpoint);
+  console.log('Data:', JSON.stringify(data, null, 2));
+};
+
+// Adicionar função de deduplificação
+function deduplicateReleases(releases: any[]) {
+  // Criar um Map usando título como chave
+  const uniqueReleases = new Map();
+
+  releases.forEach(release => {
+    const existingRelease = uniqueReleases.get(release.title);
+    
+    // Se o release já existe, manter apenas o mais recente
+    if (existingRelease) {
+      const existingDate = new Date(existingRelease.date || '0000');
+      const newDate = new Date(release.date || '0000');
+      
+      if (newDate > existingDate) {
+        uniqueReleases.set(release.title, release);
+      }
+    } else {
+      uniqueReleases.set(release.title, release);
+    }
+  });
+
+  // Converter de volta para array e ordenar por data
+  return Array.from(uniqueReleases.values())
+    .sort((a, b) => {
+      const dateA = new Date(a.date || '0000');
+      const dateB = new Date(b.date || '0000');
+      return dateB.getTime() - dateA.getTime();
+    });
+}
 
 app.use(cors());
 app.use(express.json());
 
-// Adicionar funções auxiliares para normalização
-function normalizeTitle(title: string): string {
-  return title
-    .toLowerCase()
-    // Remove caracteres especiais e pontuação
-    .replace(/[^\w\s-]/g, '')
-    // Remove números de versão e datas entre parênteses
-    .replace(/\s*\([^)]*\)/g, '')
-    // Remove sufixos comuns de versões de arquivos
-    .replace(/_\d+$/, '')
-    // Remove strings específicas que indicam duplicatas
-    .replace(/\b(disc |cd |vol\.|volume |parte |pt\.|remix|remaster)\s*\d*\b/gi, '')
-    // Normaliza espaços
-    .trim()
-    .replace(/\s+/g, ' ');
-}
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 
-function isSameAlbum(title1: string, title2: string): boolean {
-  const norm1 = normalizeTitle(title1);
-  const norm2 = normalizeTitle(title2);
-  return norm1 === norm2 || 
-         norm1.includes(norm2) || 
-         norm2.includes(norm1);
-}
-
-const validateAudioFiles = (files: any[]) => {
-  return files.some(file => 
-    (file.format === 'VBR MP3' || file.format === 'MP3') && 
-    file.length && 
-    parseInt(file.length) > 0 && 
-    !file.name.includes('/') && // Evita subdiretórios
-    !file.name.startsWith('_') // Evita arquivos de sistema
-  );
-};
-
-app.get('/api/search/artist', async (req: Request, res: Response) => {
+app.get('/search', async (req, res) => {
   try {
-    const { query } = req.query;
-    console.log('Search request received for:', query);
+    const { q: query, start = '0', rows = '10', type = 'auto' } = req.query;
     
-    if (!query || typeof query !== 'string') {
-      return res.status(400).json({ error: 'Invalid query parameter' });
+    if (!query) {
+      return res.status(400).json({ error: 'Query parameter is required' });
     }
 
-    const decodedQuery = decodeURIComponent(query).trim();
-    
-    console.log('Fetching from Internet Archive...');
-    
-    // Construir uma query mais abrangente
-    const searchTerms = decodedQuery.split(/\s+/).filter(term => term.length > 1);
-    const normalizedQuery = searchTerms.join(' ');
-    
-    // Query mais refinada
-    const searchQuery = `(
-      mediatype:(audio) AND (
-        creator:"${normalizedQuery}"^4 OR 
-        title:"${normalizedQuery}"^3 OR 
-        (${searchTerms.map(term => `creator:"${term}"`).join(' AND ')})^2 OR
-        (${searchTerms.map(term => `title:"${term}"`).join(' AND ')})
-      )
-    ) AND (
-      format:(MP3) OR format:"VBR MP3"
-    ) AND -collection:podcasts 
-      AND -collection:librivox
-      AND -collection:audio_religion
-      AND -title:cover 
-      AND -title:karaoke
-      AND -title:remix
-      AND -title:"sound effect"
-      AND -title:instrumental
-      AND avg_rating:[3 TO 5]
-      AND num_reviews:[1 TO *]
-      AND downloads:[100 TO *]`;
-
-    console.log('Search query:', searchQuery);
-
-    const response = await axios.get(ARCHIVE_API_URL, {
+    // Primeiro, tentar encontrar um artista exato
+    const artistResponse = await axios.get(`${MUSICBRAINZ_API_URL}/artist`, {
+      headers,
       params: {
-        q: searchQuery,
-        fl: ['identifier', 'title', 'creator', 'year', 'format', 'collection', 'downloads', 'avg_rating'],
-        sort: ['downloads desc', 'avg_rating desc', 'year desc'],
-        output: 'json',
-        rows: '150' // Aumentamos para ter mais opções após filtragem
+        query: query,
+        limit: 1, // Pegamos apenas o primeiro resultado mais relevante
+        fmt: 'json'
       }
     });
 
-    console.log('Archive.org response:', response.status);
-    console.log('Results found:', response.data?.response?.numFound || 0);
-
-    // Processamento dos resultados com ranking de relevância
-    if (response.data?.response?.docs) {
-      const searchTermsLower = searchTerms.map(term => term.toLowerCase());
-      const processedDocs = new Map<string, ScoredDocument>();
+    // Se encontrou um artista com score alto (> 90), buscar seus lançamentos diretamente
+    if (artistResponse.data.artists.length > 0 && artistResponse.data.artists[0].score > 90) {
+      const artist = artistResponse.data.artists[0];
       
-      // Primeiro passo: calcular scores e agrupar por título normalizado
-      const groupedByTitle = new Map<string, ScoredDocument[]>();
-      
-      response.data.response.docs
-        .map((doc: ArchiveDocument) => {
-          const title = Array.isArray(doc.title) ? doc.title[0] : doc.title;
-          const creator = Array.isArray(doc.creator) ? doc.creator[0] : doc.creator;
-          const normalizedTitle = normalizeTitle(title);
-          
-          let score = 0;
-          const titleLower = title?.toLowerCase() || '';
-          const creatorLower = creator?.toLowerCase() || '';
+      // Buscar os lançamentos do artista com mais detalhes
+      const releasesResponse = await axios.get(`${MUSICBRAINZ_API_URL}/release`, {
+        headers,
+        params: {
+          artist: artist.id,
+          limit: 50, // Aumentar o limite de busca
+          offset: start,
+          fmt: 'json',
+          inc: 'recordings+artist-credits+release-groups+url-rels',
+          status: 'official' // Apenas releases oficiais
+        }
+      });
 
-          // Cálculo de score melhorado
-          if (titleLower.includes(decodedQuery.toLowerCase())) score += 10;
-          if (creatorLower.includes(decodedQuery.toLowerCase())) score += 10;
-          if (creator === 'Album') score -= 5; // Penalizar entradas genéricas
+      // Processar os lançamentos com múltiplas fontes de capas
+      const releases = await Promise.all(
+        releasesResponse.data.releases.map(async (release: any) => {
+          try {
+            // Tentar múltiplas fontes de capas
+            const coverPromises = [
+              // Cover Art Archive
+              axios.get(`${COVER_ART_URL}/release/${release.id}`, { headers })
+                .then(res => res.data.images[0]?.thumbnails)
+                .catch(() => null),
+              // Release Group Cover Art
+              release['release-group']?.id ? 
+                axios.get(`${COVER_ART_URL}/release-group/${release['release-group'].id}`, { headers })
+                  .then(res => res.data.images[0]?.thumbnails)
+                  .catch(() => null) : 
+                Promise.resolve(null),
+              // Tentar capa do MusicBrainz diretamente
+              axios.get(`${MUSICBRAINZ_API_URL}/release/${release.id}`, {
+                headers,
+                params: { inc: 'url-rels', fmt: 'json' }
+              })
+                .then(res => {
+                  const artworkUrl = res.data.relations?.find((rel: any) => 
+                    rel.type === 'artwork' || rel.type === 'cover art'
+                  )?.url?.resource;
+                  return artworkUrl ? { small: artworkUrl, medium: artworkUrl, large: artworkUrl } : null;
+                })
+                .catch(() => null)
+            ];
 
-          searchTermsLower.forEach(term => {
-            if (titleLower.includes(term)) score += 3;
-            if (creatorLower.includes(term)) score += 3;
-          });
+            // Usar a primeira capa disponível
+            const covers = await Promise.all(coverPromises);
+            const coverArt = covers.find(cover => cover !== null) || null;
 
-          const scoredDoc: ScoredDocument = {
-            identifier: doc.identifier,
-            title,
-            creator,
-            year: doc.year,
-            _score: score
-          };
-
-          // Agrupar documentos similares
-          const existing = Array.from(groupedByTitle.values()).flat();
-          const similarGroup = existing.find(g => isSameAlbum(g.title, title));
-          
-          if (similarGroup) {
-            const groupKey = normalizeTitle(similarGroup.title);
-            const group = groupedByTitle.get(groupKey) || [];
-            group.push(scoredDoc);
-            groupedByTitle.set(groupKey, group);
-          } else {
-            groupedByTitle.set(normalizedTitle, [scoredDoc]);
+            return {
+              id: release.id,
+              title: release.title,
+              date: release.date,
+              coverArt,
+              artist: artist.name,
+              type: 'release',
+              releaseType: release['release-group']?.type || 'Album',
+              trackCount: release.media?.[0]?.track_count || 0
+            };
+          } catch (error) {
+            console.error(`Error processing release ${release.id}:`, error);
+            return {
+              id: release.id,
+              title: release.title,
+              date: release.date,
+              coverArt: null,
+              artist: artist.name,
+              type: 'release',
+              releaseType: release['release-group']?.type || 'Album',
+              trackCount: release.media?.[0]?.track_count || 0
+            };
           }
+        })
+      );
+
+      // Deduplificar e filtrar releases
+      const deduplicatedReleases = deduplicateReleases(releases)
+        .filter(release => 
+          // Remover singles e outros tipos menos relevantes se houver muitos resultados
+          releases.length > 10 ? 
+            ['Album', 'Live'].includes(release.releaseType) : 
+            true
+        )
+        .sort((a, b) => {
+          // Priorizar álbuns com capa
+          if (a.coverArt && !b.coverArt) return -1;
+          if (!a.coverArt && b.coverArt) return 1;
+          // Depois por data
+          return new Date(b.date || '0000').getTime() - new Date(a.date || '0000').getTime();
         });
 
-      // Segundo passo: selecionar o melhor resultado de cada grupo
-      response.data.response.docs = Array.from(groupedByTitle.values())
-        .map(group => group.reduce((best, current) => 
-          current._score > best._score ? current : best
-        ))
-        .filter(doc => doc._score > 0)
-        .sort((a, b) => b._score - a._score)
-        .slice(0, 50);
+      return res.json({
+        response: {
+          docs: deduplicatedReleases,
+          numFound: releasesResponse.data.count,
+          start: parseInt(start.toString()),
+          rows: parseInt(rows.toString()),
+          type: 'releases',
+          artist: artist.name
+        }
+      });
     }
 
-    res.json(response.data);
-  } catch (error: any) {
-    console.error('Search error details:', {
-      message: error.message,
-      response: error.response?.data,
-      status: error.response?.status,
-      stack: error.stack
+    // Se não encontrou um artista exato, buscar por gravações (músicas)
+    const recordingResponse = await axios.get(`${MUSICBRAINZ_API_URL}/recording`, {
+      headers,
+      params: {
+        query: query,
+        limit: rows,
+        offset: start,
+        fmt: 'json'
+      }
     });
-    res.status(500).json({ 
-      error: 'Search failed',
-      details: error.message 
+
+    const recordings = recordingResponse.data.recordings.map((recording: any) => ({
+      id: recording.id,
+      title: recording.title,
+      artist: recording['artist-credit']?.[0]?.name || 'Unknown Artist',
+      type: 'recording'
+    }));
+
+    return res.json({
+      response: {
+        docs: recordings,
+        numFound: recordingResponse.data.count,
+        start: parseInt(start.toString()),
+        rows: parseInt(rows.toString()),
+        type: 'recordings'
+      }
     });
+
+  } catch (error) {
+    console.error('\n=== Error ===');
+    if (axios.isAxiosError(error)) {
+      console.error('Search error details:', error.response?.data || error.message);
+    } else {
+      console.error('Search error details:', error);
+    }
+    res.status(500).json({ error: 'Failed to perform search' });
   }
 });
 
-app.get('/api/track/:identifier', async (req: Request, res: Response) => {
+app.get('/artist/:id/releases', async (req, res) => {
   try {
-    const { identifier } = req.params;
+    const { id } = req.params;
+    const { start = '0', rows = '10' } = req.query;
 
-    // Adicionar logs detalhados
-    console.log('\n=== Album Details ===');
-    console.log('Identifier:', identifier);
-    console.log('Archive.org URL:', `https://archive.org/details/${identifier}`);
-    console.log('Metadata URL:', `https://archive.org/metadata/${identifier}`);
-    console.log('===================\n');
-
-    const response = await axios.get(`https://archive.org/metadata/${identifier}`);
-    const metadata = response.data;
-
-    // Adicionar mais informações de debug
-    console.log('Album Metadata:', {
-      title: metadata.metadata.title,
-      creator: metadata.metadata.creator,
-      year: metadata.metadata.year,
-      totalFiles: metadata.files.length,
-      audioFiles: metadata.files.filter((f: any) => 
-        f.format === 'VBR MP3' || f.format === 'MP3'
-      ).length
+    logRequestInfo('MusicBrainz Releases', {
+      artistId: id,
+      start,
+      rows,
+      url: `${MUSICBRAINZ_API_URL}/release`
     });
 
-    // Validar arquivos MP3
-    const validFiles = metadata.files.filter((file: any) => 
-      (file.format === 'VBR MP3' || file.format === 'MP3') &&
-      file.length &&
-      parseInt(file.length) > 0 &&
-      !file.name.includes('/') &&
-      !file.name.startsWith('_')
+    const response = await axios.get(`${MUSICBRAINZ_API_URL}/release`, {
+      headers,
+      params: {
+        artist: id,
+        limit: rows,
+        offset: start,
+        fmt: 'json',
+        inc: 'recordings+artist-credits+release-groups'
+      }
+    });
+
+    // Log da resposta do MusicBrainz
+    logResponseInfo('MusicBrainz Releases Response', {
+      count: response.data.count,
+      releases: response.data.releases.map((r: any) => ({
+        id: r.id,
+        title: r.title,
+        date: r.date
+      }))
+    });
+
+    // Buscar capas de álbum e processar releases
+    const releases = await Promise.all(
+      response.data.releases.map(async (release: any) => {
+        try {
+          const coverArt = await axios.get(`${COVER_ART_URL}/release/${release.id}`, { headers });
+          return {
+            id: release.id,
+            title: release.title,
+            date: release.date,
+            coverArt: coverArt.data.images[0]?.thumbnails || null,
+            artist: release['artist-credit']?.[0]?.name || '',
+            tracks: release.media?.[0]?.tracks || []
+          };
+        } catch {
+          return {
+            id: release.id,
+            title: release.title,
+            date: release.date,
+            coverArt: null,
+            artist: release['artist-credit']?.[0]?.name || '',
+            tracks: release.media?.[0]?.tracks || []
+          };
+        }
+      })
     );
 
-    console.log('Valid audio files:', validFiles.length);
-    
-    if (validFiles.length === 0) {
-      console.log('Warning: No valid audio files found in this album');
-      return res.status(404).json({ error: 'No valid audio files found' });
-    }
-
-    // Log dos arquivos válidos
-    console.log('\nValid tracks:');
-    validFiles.forEach((file: any, index: number) => {
-      console.log(`${index + 1}. ${file.name} (${file.format}, ${file.length}s)`);
-    });
-
-    // Processar os dados do álbum
-    const album = {
-      identifier: metadata.metadata.identifier,
-      title: metadata.metadata.title,
-      creator: metadata.metadata.creator,
-      year: metadata.metadata.year,
-      coverUrl: `https://archive.org/services/img/${identifier}`,
-      tracks: validFiles
-        .map((file: any) => ({
-          identifier: `${identifier}/${file.name}`,
-          title: file.title || file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " "),
-          creator: metadata.metadata.creator,
-          streamUrl: `https://archive.org/download/${identifier}/${file.name}`,
-          duration: parseFloat(file.length) || 0,
-          track: file.track ? parseInt(file.track) : null,
-          format: file.format,
-          size: parseInt(file.size || '0'),
-          bitrate: file.bitrate
-        }))
-        .sort((a: any, b: any) => {
-          // Melhor ordenação de faixas
-          if (a.track && b.track) return a.track - b.track;
-          if (a.track) return -1;
-          if (b.track) return 1;
-          return a.title.localeCompare(b.title);
-        })
+    const result = {
+      response: {
+        docs: releases,
+        numFound: response.data.count,
+        start: parseInt(start.toString()),
+        rows: parseInt(rows.toString())
+      }
     };
 
-    res.json(album);
+    // Log do resultado final
+    logResponseInfo('Final Releases Response', result);
+
+    res.json(result);
   } catch (error) {
-    console.error('Track fetch error:', error);
-    res.status(500).json({ error: 'Failed to fetch track details' });
+    console.error('\n=== Error ===');
+    if (axios.isAxiosError(error)) {
+      console.error('Releases error details:', error.response?.data || error.message);
+    } else {
+      console.error('Releases error:', error);
+    }
+    res.status(500).json({ error: 'Failed to fetch releases' });
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-  console.log(`Test the API: http://localhost:${port}/api/search/artist?query=grateful%20dead`);
+// Nova rota para obter detalhes de uma release específica
+app.get('/release/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const response = await axios.get(`${MUSICBRAINZ_API_URL}/release/${id}`, {
+      headers,
+      params: {
+        fmt: 'json',
+        inc: 'recordings+artist-credits'
+      }
+    });
+
+    // Tentar buscar a capa do álbum
+    let coverArt;
+    try {
+      const coverResponse = await axios.get(`${COVER_ART_URL}/release/${id}`, { headers });
+      coverArt = coverResponse.data.images[0]?.thumbnails;
+    } catch {
+      coverArt = null;
+    }
+
+    res.json({
+      ...response.data,
+      coverArt
+    });
+  } catch (error) {
+    console.error('Release detail error:', error);
+    res.status(500).json({ error: 'Failed to fetch release details' });
+  }
 });
+
+app.get('/track/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Buscar detalhes da release com as faixas
+    const releaseResponse = await axios.get(`${MUSICBRAINZ_API_URL}/release/${id}`, {
+      headers,
+      params: {
+        fmt: 'json',
+        inc: 'recordings+artist-credits+media'  // Incluir media para obter as faixas
+      }
+    });
+
+    // Buscar capa do álbum
+    let coverArt;
+    try {
+      const coverResponse = await axios.get(`${COVER_ART_URL}/release/${id}`, { headers });
+      coverArt = coverResponse.data.images[0]?.thumbnails;
+    } catch {
+      coverArt = null;
+    }
+
+    // Processar e formatar as faixas
+    const tracks = releaseResponse.data.media?.[0]?.tracks?.map((track: any) => ({
+      identifier: track.id,
+      title: track.title || track.recording?.title,
+      artist: track['artist-credit']?.[0]?.name || releaseResponse.data['artist-credit']?.[0]?.name,
+      duration: track.length ? track.length / 1000 : null, // Converter para segundos
+      track: track.position,
+      streamUrl: `https://musicbrainz.org/recording/${track.recording?.id}`,
+      coverArt: coverArt
+    })) || [];
+
+    // Montar o objeto de resposta
+    const response = {
+      identifier: releaseResponse.data.id,
+      title: releaseResponse.data.title,
+      creator: releaseResponse.data['artist-credit']?.[0]?.name || 'Unknown Artist',
+      year: releaseResponse.data.date?.split('-')[0],
+      coverUrl: coverArt?.large || coverArt?.medium || coverArt?.small,
+      tracks: tracks,
+      coverArt: coverArt
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('Track detail error:', error);
+    if (axios.isAxiosError(error)) {
+      console.error('API Error details:', error.response?.data);
+    }
+    res.status(500).json({ 
+      error: 'Failed to fetch track details',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Error handling middleware
+app.use((error: any, req: any, res: any, next: any) => {
+  console.error('Server error:', error);
+  res.status(error.status || 500).json({
+    error: error.message || 'Internal server error'
+  });
+});
+
+export { app };
+
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
+}

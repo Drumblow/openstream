@@ -1,10 +1,37 @@
+interface CacheItem<T> {
+  value: T;
+  timestamp: number;
+  ttl: number;
+}
+
 class CacheService {
   private static instance: CacheService;
   private cache: Map<string, { value: any; timestamp: number; ttl: number }>;
   private readonly DEFAULT_TTL = 3600 * 1000; // 1 hour in milliseconds
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
     this.cache = new Map();
+    this.startCleanupTimer();
+  }
+
+  private startCleanupTimer() {
+    // Função de limpeza
+    const runCleanup = () => {
+      this.cleanup();
+      // Agendar próxima limpeza
+      this.cleanupTimer = setTimeout(runCleanup, 3600 * 1000);
+    };
+
+    // Iniciar o ciclo de limpeza
+    this.cleanupTimer = setTimeout(runCleanup, 3600 * 1000);
+  }
+
+  public stopCleanupTimer() {
+    if (this.cleanupTimer) {
+      clearTimeout(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
   }
 
   public static getInstance(): CacheService {
@@ -14,14 +41,15 @@ class CacheService {
     return CacheService.instance;
   }
 
-  async get(key: string): Promise<any> {
+  async get(namespace: string, key: string): Promise<any> {
     try {
-      const cached = this.cache.get(key);
+      const cacheKey = `${namespace}:${key}`;
+      const cached = this.cache.get(cacheKey);
       if (!cached) return null;
 
       const { value, timestamp, ttl } = cached;
       if (Date.now() - timestamp > ttl) {
-        this.cache.delete(key);
+        this.cache.delete(cacheKey);
         return null;
       }
 
@@ -32,9 +60,10 @@ class CacheService {
     }
   }
 
-  async set(key: string, value: any, ttl: number = this.DEFAULT_TTL): Promise<void> {
+  async set(namespace: string, key: string, value: any, ttl: number = this.DEFAULT_TTL): Promise<void> {
     try {
-      this.cache.set(key, {
+      const cacheKey = `${namespace}:${key}`;
+      this.cache.set(cacheKey, {
         value,
         timestamp: Date.now(),
         ttl
@@ -44,24 +73,28 @@ class CacheService {
     }
   }
 
-  async del(key: string): Promise<void> {
+  async del(namespace: string, key: string): Promise<void> {
     try {
-      this.cache.delete(key);
+      const cacheKey = `${namespace}:${key}`;
+      this.cache.delete(cacheKey);
     } catch (error) {
       console.error('Cache delete error:', error);
     }
   }
 
-  async clear(): Promise<void> {
+  async clear(namespace: string): Promise<void> {
     try {
-      this.cache.clear();
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(`${namespace}:`)) {
+          this.cache.delete(key);
+        }
+      }
     } catch (error) {
       console.error('Cache clear error:', error);
     }
   }
 
-  // Cleanup expired items
-  cleanup(): void {
+  private cleanup(): void {
     const now = Date.now();
     for (const [key, cached] of this.cache.entries()) {
       if (now - cached.timestamp > cached.ttl) {
@@ -72,8 +105,3 @@ class CacheService {
 }
 
 export const cacheService = CacheService.getInstance();
-
-// Run cleanup every hour
-setInterval(() => {
-  cacheService.cleanup();
-}, 3600 * 1000);
